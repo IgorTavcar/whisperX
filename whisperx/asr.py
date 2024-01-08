@@ -1,5 +1,5 @@
 import os
-from typing import List, Union, Optional, NamedTuple
+from typing import List, Union, Optional, NamedTuple, Callable, Tuple
 
 import ctranslate2
 import faster_whisper
@@ -179,8 +179,19 @@ class FasterWhisperPipeline(Pipeline):
 
     def transcribe(
             self, audio: Union[str, np.ndarray], batch_size=None, num_workers=0, language=None, task=None,
-            chunk_size=30, print_progress=False, combined_progress=False, progress_function=None
+            chunk_size=30, segment_callback: Callable[[Tuple[float, float, str]], bool] = None
     ) -> TranscriptionResult:
+        """
+        Do the transcription by first running VAD and then running inference on each segment.
+        :param audio: path to audio file or numpy array with shape (n_samples,)
+        :param batch_size: batch size for inference
+        :param num_workers: number of workers for inference
+        :param language: language code for tokenizer
+        :param task: task for tokenizer
+        :param chunk_size: chunk size for VAD
+        :param segment_callback: if returns False, stop inference
+        :return: TranscriptionResult
+        """
         if isinstance(audio, str):
             audio = load_audio(audio)
 
@@ -225,13 +236,6 @@ class FasterWhisperPipeline(Pipeline):
         total_segments = len(vad_segments)
         for idx, out in enumerate(
                 self.__call__(data(audio, vad_segments), batch_size=batch_size, num_workers=num_workers)):
-            base_progress = ((idx + 1) / total_segments)
-            fraction_complete = base_progress / 2 if combined_progress else base_progress
-            if print_progress:
-                percent_complete = fraction_complete * 100
-                print(f"Progress: {percent_complete:.2f}%...")
-            if progress_function:
-                progress_function(fraction_complete)
             text = out['text']
             if batch_size in [0, 1, None]:
                 text = text[0]
@@ -242,6 +246,9 @@ class FasterWhisperPipeline(Pipeline):
                     "end": round(vad_segments[idx]['end'], 3)
                 }
             )
+            if segment_callback is not None:
+                if not segment_callback((vad_segments[idx]['start'], vad_segments[idx]['end'], text)):
+                    break
 
         # revert the tokenizer if multilingual inference is enabled
         if self.preset_language is None:
